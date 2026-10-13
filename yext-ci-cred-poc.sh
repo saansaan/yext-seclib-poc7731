@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
-# Are DB/queue credentials baked into the world-readable build binaries?
-# READ-ONLY: strings over files already readable. No connection attempts, no credential use.
+# Quantify the embedded DB credential config. READ-ONLY.
+# Deliberately does NOT attempt any database connection or use any credential.
 set +e
 B="YEXTPOC7731"; echo "$B-BEGIN"
 BINS="/scripts/bin/cbdservice /scripts/bin/artifactbundler"
 
-e(){ echo "--- $1 ---"; strings -n 6 $BINS 2>/dev/null | grep -aoE "$2" | sort -u | head -25; }
+for F in $BINS; do
+  echo "$B ######## $(basename $F) ########"
+  strings -n 4 "$F" 2>/dev/null > /tmp/s.txt
+  echo "  password: lines  = $(grep -c '^ *password: ' /tmp/s.txt)"
+  echo "  username: lines  = $(grep -c '^ *username: ' /tmp/s.txt)"
+  echo "  host: lines      = $(grep -c '^ *host: ' /tmp/s.txt)"
+  echo "  --- distinct hosts referenced in the config ---"
+  grep -oE '^ *host: .*' /tmp/s.txt | sed 's/^ *host: //' | sort -u
+  echo "  --- ENVIRONMENT BREAKDOWN of those hosts ---"
+  grep -oE '^ *host: .*' /tmp/s.txt | sed 's/^ *host: //' \
+    | grep -oE '\.(dev|qa|sbx|prod)\.' | sort | uniq -c
+  echo "  --- ANY PROD host in the credential config? ---"
+  grep -oE '^ *host: .*prod.*' /tmp/s.txt | sort -u | head -20
+  echo "  (empty above = no prod hosts)"
+done
 
-echo "$B === 1. GO SQL DSN  user:pass@tcp(host:port)/db ==="
-e "mysql dsn"  '[A-Za-z0-9_.-]{2,30}:[^@[:space:]"]{4,60}@(tcp|unix)\([^)]{4,60}\)/[A-Za-z0-9_-]{1,40}'
-echo "$B === 2. URI-STYLE CREDENTIALS ==="
-e "scheme uris" '(mysql|postgres|postgresql|redis|rediss|amqp|amqps|mongodb|clickhouse|kafka)://[A-Za-z0-9_.:@%-]{4,90}'
-echo "$B === 3. JDBC ==="
-e "jdbc" 'jdbc:[a-z]+://[A-Za-z0-9_.:@/-]{4,80}'
-echo "$B === 4. CONFIG KEYS THAT WOULD HOLD A SECRET ==="
-e "keys" '[A-Za-z_][A-Za-z0-9_.-]{2,40}(password|passwd|secret|apikey|api_key|token|credential)[A-Za-z0-9_.-]{0,30}'
-echo "$B === 5. PRIVATE KEYS / CERTS EMBEDDED ==="
-strings -n 10 $BINS 2>/dev/null | grep -aoE '\-\-\-\-\-BEGIN [A-Z ]{3,40}\-\-\-\-\-' | sort | uniq -c
-echo "$B === 6. KNOWN CREDENTIAL PREFIXES ==="
-strings -n 8 $BINS 2>/dev/null | grep -aoE '(ghp_|gho_|ghs_|github_pat_|ya29\.|AIza|xox[baprs]-|AKIA|ASIA|sk_live|sk-)[A-Za-z0-9_-]{10,}' | sort -u | head -10
-echo "  (none printed above = no matches)"
-echo "$B === 7. SQL HOST + NEARBY USER STRINGS (context) ==="
-strings -n 4 /scripts/bin/cbdservice 2>/dev/null | grep -aA2 -B2 'app-sql01.dev.us3.yext.com' | head -20
+echo "$B === FULL CREDENTIAL BLOCK (cbdservice) ==="
+strings -n 4 /scripts/bin/cbdservice 2>/dev/null \
+ | grep -E '^ *(host|username|password): |^  [a-z0-9_-]+:$' \
+ | head -200
 
 echo "$B-END"; exit 0
