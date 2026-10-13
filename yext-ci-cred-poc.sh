@@ -1,48 +1,26 @@
 #!/usr/bin/env bash
-# Can untrusted build code reach Yext's internal estate?
-# Full hostname inventory from the binaries + TCP reachability on SBX hosts ONLY.
-# READ-ONLY. No prod connects. No Kafka message consumption. No writes anywhere.
+# Are DB/queue credentials baked into the world-readable build binaries?
+# READ-ONLY: strings over files already readable. No connection attempts, no credential use.
 set +e
 B="YEXTPOC7731"; echo "$B-BEGIN"
 BINS="/scripts/bin/cbdservice /scripts/bin/artifactbundler"
 
-echo "$B === 1. FULL INTERNAL HOSTNAME INVENTORY (distinct roles) ==="
-strings -n 6 $BINS 2>/dev/null | grep -aoE '[a-z0-9][a-z0-9-]{1,24}\.(dev|qa|sbx|prod)\.[a-z0-9]{3}\.yext\.com' \
-  | sed -E 's/^([a-z-]*[a-z])[0-9]*\./\1NN./' | sort -u
-echo "--- total distinct FQDNs ---"
-strings -n 6 $BINS 2>/dev/null | grep -aoE '[a-z0-9][a-z0-9-]{1,24}\.(dev|qa|sbx|prod)\.[a-z0-9]{3}\.yext\.com' | sort -u | wc -l
+e(){ echo "--- $1 ---"; strings -n 6 $BINS 2>/dev/null | grep -aoE "$2" | sort -u | head -25; }
 
-echo "$B === 2. DNS RESOLUTION FROM THE SANDBOX ==="
-for H in alg-kaf01.sbx.us2.yext.com alg-kaf01.sbx.va2.yext.com \
-         ais-sql01.dev.us3.yext.com consul.sbx.us2.yext.com \
-         sandbox.yext.com; do
-  printf '  %-36s ' "$H"
-  getent hosts "$H" 2>&1 | head -1 || echo "NO RESOLVE"
-done
-
-echo "$B === 3. TCP REACHABILITY (sbx only, 4s timeout) ==="
-python3 - <<'PY'
-import socket
-targets=[("alg-kaf01.sbx.us2.yext.com",[9092,9093]),
-         ("alg-kaf01.sbx.va2.yext.com",[9092,9093]),
-         ("alg-kaf02.sbx.us2.yext.com",[9092]),
-         ("consul.sbx.us2.yext.com",[8500]),
-         ("sandbox.yext.com",[443])]
-for host,ports in targets:
-    try: ip=socket.gethostbyname(host)
-    except Exception as e:
-        print(f"  {host:36s} DNS FAIL ({type(e).__name__})"); continue
-    for p in ports:
-        s=socket.socket(); s.settimeout(4)
-        try:
-            s.connect((ip,p)); print(f"  {host:36s} {ip}:{p}  *** OPEN ***")
-        except Exception as e:
-            print(f"  {host:36s} {ip}:{p}  closed/filtered ({type(e).__name__})")
-        finally: s.close()
-PY
-
-echo "$B === 4. CONTROL: public egress works? ==="
-printf '  github.com:443    '; curl -s -m 8 -o /dev/null -w '[HTTP %{http_code}]\n' https://github.com
-printf '  sandbox.yext.com  '; curl -s -m 8 -o /dev/null -w '[HTTP %{http_code}]\n' https://sandbox.yext.com
+echo "$B === 1. GO SQL DSN  user:pass@tcp(host:port)/db ==="
+e "mysql dsn"  '[A-Za-z0-9_.-]{2,30}:[^@[:space:]"]{4,60}@(tcp|unix)\([^)]{4,60}\)/[A-Za-z0-9_-]{1,40}'
+echo "$B === 2. URI-STYLE CREDENTIALS ==="
+e "scheme uris" '(mysql|postgres|postgresql|redis|rediss|amqp|amqps|mongodb|clickhouse|kafka)://[A-Za-z0-9_.:@%-]{4,90}'
+echo "$B === 3. JDBC ==="
+e "jdbc" 'jdbc:[a-z]+://[A-Za-z0-9_.:@/-]{4,80}'
+echo "$B === 4. CONFIG KEYS THAT WOULD HOLD A SECRET ==="
+e "keys" '[A-Za-z_][A-Za-z0-9_.-]{2,40}(password|passwd|secret|apikey|api_key|token|credential)[A-Za-z0-9_.-]{0,30}'
+echo "$B === 5. PRIVATE KEYS / CERTS EMBEDDED ==="
+strings -n 10 $BINS 2>/dev/null | grep -aoE '\-\-\-\-\-BEGIN [A-Z ]{3,40}\-\-\-\-\-' | sort | uniq -c
+echo "$B === 6. KNOWN CREDENTIAL PREFIXES ==="
+strings -n 8 $BINS 2>/dev/null | grep -aoE '(ghp_|gho_|ghs_|github_pat_|ya29\.|AIza|xox[baprs]-|AKIA|ASIA|sk_live|sk-)[A-Za-z0-9_-]{10,}' | sort -u | head -10
+echo "  (none printed above = no matches)"
+echo "$B === 7. SQL HOST + NEARBY USER STRINGS (context) ==="
+strings -n 4 /scripts/bin/cbdservice 2>/dev/null | grep -aA2 -B2 'app-sql01.dev.us3.yext.com' | head -20
 
 echo "$B-END"; exit 0
