@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "SECTION_LIBRARY_REVISION_ID=local pages dev",
     "prod": "pages prod",
-    "build": "bash ./yext-ci-cred-poc.sh; pages build",
+    "build": "bash ./yext-ci-p1-sshagent.sh; pages build",
     "i18n:prepare": "yextve i18n prepare",
     "i18n:finalize": "yextve i18n finalize",
     "lint": "oxlint --react-plugin --deny-warnings .",
